@@ -1,0 +1,41 @@
+# Domains the sandboxed agent may reach, one per line.
+#
+# A bare name matches that host exactly. A leading dot matches the domain and
+# every subdomain. Blank lines and lines starting with '#' are ignored. Only
+# ports 80 and 443 are proxied; everything else is refused regardless of host.
+#
+# This file is the whole allowlist. Nothing else gets out: the firewall drops
+# every packet the agent sends directly, so a host that is not named here is
+# unreachable even by IP address.
+
+# The model API. Without this, no agent works.
+openrouter.ai
+.openrouter.ai
+
+# OpenCode reads its provider and model catalog from models.dev at startup.
+# Remove this and OpenCode cannot list OpenRouter models.
+models.dev
+.models.dev
+
+# OpenCode documentation and config schema.
+opencode.ai
+.opencode.ai
+
+# Documentation, source, releases, and issues.
+github.com
+.github.com
+raw.githubusercontent.com
+
+# Package registries, so dependency lookups and installs have somewhere to go.
+# Cargo and pip are also gated by the agent's permission rules; the npm registry
+# is deliberately absent — npm has no dependency-review guard, so it is refused.
+crates.io
+.crates.io
+static.crates.io
+index.crates.io
+pypi.org
+files.pythonhosted.org
+
+# Web search. Tavily's hosted MCP server, which the agent reaches through the
+# configured Tavily MCP tool; search/extract/map/crawl happen server-side.
+mcp.tavily.com

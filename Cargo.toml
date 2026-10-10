@@ -1,0 +1,14 @@
+[package]
+name = "open-sandbox"
+description = "Run OpenCode with OpenRouter in an Apple container VM"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+keywords = ["openrouter", "sandbox", "container", "macos", "ai"]
+categories = ["command-line-utilities", "development-tools"]
+
+# No dependencies, by design. The binary is a thin wrapper around the
+# `container` and `security` CLIs, and everything it ships is a static asset.
+[dependencies]
+
+[dev-dependencies]

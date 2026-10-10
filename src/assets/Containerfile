@@ -1,0 +1,153 @@
+# OpenCode Development Container
+# Provides a development environment for OpenCode backed by OpenRouter, with an
+# egress firewall and a domain-allowlisting proxy.
+
+FROM ubuntu:26.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Install system-level dependencies for all sections below.
+#   Base:     curl, git, ca-certificates
+#   Agents:   ripgrep, jq, nodejs, npm
+#   Egress:   nftables (firewall)
+#   Privdrop: util-linux (setpriv)
+#   Rust:     build-essential, pkg-config, libssl-dev
+#   Python:   python3, python3-dev
+#   Docs:     fonts-ibm-plex
+#   Editor:   emacs-nox
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git ca-certificates \
+    ripgrep jq nodejs npm \
+    nftables \
+    util-linux \
+    build-essential pkg-config libssl-dev \
+    python3 python3-dev \
+    fonts-ibm-plex \
+    emacs-nox \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pandoc (apt version lags behind; install pre-built binary from GitHub).
+# --no-same-owner so the archive's uid does not leak through: extracted as
+# root, these files land root-owned instead of owned by whatever uid the
+# archive happens to carry.
+RUN curl -sSL https://github.com/jgm/pandoc/releases/download/3.9.0.2/pandoc-3.9.0.2-linux-arm64.tar.gz \
+    | tar -xz --strip-components=1 --no-same-owner -C /usr/local
+
+# Typst typesetting compiler (not packaged in Ubuntu; pre-built binary from GitHub)
+RUN curl -sSL https://github.com/typst/typst/releases/latest/download/typst-aarch64-unknown-linux-musl.tar.xz \
+    | tar -xJ --strip-components=1 --no-same-owner -C /usr/local/bin
+
+# Two users. The agent runs as 'agent' and never gets the network directly.
+# 'egress' owns the only UID the firewall lets out, and runs the allowlist
+# proxy. Splitting them is what makes the nftables rule expressible.
+RUN useradd -m -d /home/agent -s /bin/bash agent \
+    && useradd -r -u 900 -M -d /nonexistent -s /usr/sbin/nologin egress
+
+USER agent
+
+# PATH for tools installed to ~/.local/bin and ~/.cargo/bin
+ENV PATH="/home/agent/.local/bin:/home/agent/.cargo/bin:${PATH}"
+
+# Ensure 256-color support; not always inherited from the host terminal
+ENV TERM=xterm-256color
+ENV EDITOR=emacs
+
+# =============================================================================
+# Rust
+# =============================================================================
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    --default-toolchain stable \
+    --component rust-analyzer \
+    --component rust-src \
+    --component clippy \
+    --component rustfmt \
+    --component llvm-tools
+
+# Nightly toolchain with rust-src for cargo-fuzz (libFuzzer requires nightly)
+RUN rustup toolchain install nightly --component rust-src
+
+# cargo-fuzz for running fuzz targets; cargo-llvm-cov for code coverage
+RUN cargo install cargo-fuzz cargo-llvm-cov
+
+# Shared target directory keeps build artifacts out of the project volume
+ENV CARGO_TARGET_DIR="/home/agent/cargo-target"
+
+# =============================================================================
+# Python
+# =============================================================================
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Use container-local directories to avoid conflicts with host macOS packages
+ENV UV_PROJECT_ENVIRONMENT="/home/agent/.venv"
+ENV UV_CACHE_DIR="/home/agent/.cache/uv"
+
+RUN uv tool install basedpyright \
+    && ln -s basedpyright-langserver /home/agent/.local/bin/pyright-langserver
+
+# =============================================================================
+# DuckDB
+# =============================================================================
+
+RUN curl https://install.duckdb.org | sh
+
+# =============================================================================
+# OpenCode (last among installs — changes most often, protects the layer cache)
+# =============================================================================
+
+USER root
+
+# OpenCode comes from npm so it lands in /usr/local, root-owned and out of the
+# agent's reach.
+RUN npm install -g opencode-ai \
+    && npm cache clean --force
+
+# OpenCode Power Pack: source of the code-review, security-review, and related
+# skills ported from Anthropic's Claude Code plugins. Installed into the image so
+# OpenCode reads the skill files from the global node_modules instead of fetching
+# them at startup; opencode.json selects the specific skill directories it wants
+# under skills.paths, so the rest of the catalog stays out of context. Tracks the
+# latest release, so a rebuild picks up the newest skill content.
+RUN npm install -g @waybarrios/opencode-power-pack@latest \
+    && npm cache clean --force
+
+# =============================================================================
+# Workspace — root-owned config, sticky-bit parents
+# =============================================================================
+#
+# The agent runs unprivileged, so root-owned config files are read-only to it.
+# Sticky bits on the parent directories stop the agent from deleting or
+# renaming its way around a file it cannot rewrite in place. This raises the
+# bar; the container boundary is still the guarantee that matters.
+
+COPY entrypoint.sh /usr/local/bin/open-sandbox-entrypoint
+COPY egress-proxy.py /usr/local/lib/open-sandbox/egress-proxy.py
+COPY allowlist.txt /etc/open-sandbox/allowlist.txt
+COPY sandbox-checks.py /home/agent/sandbox-checks.py
+COPY sandbox-tools.py /home/agent/sandbox-tools.py
+
+# OpenCode: global config, global context file, slash commands, and TUI settings
+COPY opencode.json /home/agent/.config/opencode/opencode.json
+COPY AGENTS.md /home/agent/.config/opencode/AGENTS.md
+COPY tui.json /home/agent/.config/opencode/tui.json
+COPY commands/ /home/agent/.config/opencode/command/
+
+RUN chmod 0755 /usr/local/bin/open-sandbox-entrypoint \
+                /usr/local/lib/open-sandbox/egress-proxy.py \
+ && chown -R root:root /usr/local/bin /usr/local/lib \
+ && chmod 0444 /etc/open-sandbox/allowlist.txt \
+ && chown -R root:root /home/agent/.config/opencode \
+ && chmod -R a-w /home/agent/.config/opencode \
+ && chown agent:agent /home/agent /home/agent/.config \
+ && chmod 1755 /home/agent /home/agent/.config \
+ && install -d -o agent -g agent -m 0700 /home/agent/.local/share/opencode \
+ && install -d -o agent -g agent -m 0755 /tmp/agent \
+ && chown agent:agent /home/agent/sandbox-checks.py /home/agent/sandbox-tools.py
+
+ENV TMPDIR=/tmp/agent
+
+WORKDIR /home/agent/code
+
+ENTRYPOINT ["/usr/local/bin/open-sandbox-entrypoint"]
+CMD ["opencode"]
