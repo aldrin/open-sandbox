@@ -1176,5 +1176,50 @@ mod tests {
             .collect();
         assert!(active.contains(&"openrouter.ai"));
         assert!(active.contains(&"models.dev"));
+        assert!(active.contains(&"registry.npmjs.org"));
+        assert!(active.contains(&"nodejs.org"));
+    }
+
+    /// The npm registry is reachable now, so the blanket denies are gone. The
+    /// mutating install commands are gated with "ask" the way cargo and uv are,
+    /// and a dependency file an install would rewrite asks too.
+    #[test]
+    fn opencode_config_gates_npm_dependencies() {
+        let config = include_str!("assets/opencode.json");
+        assert!(
+            !config.contains("\"npm*\": \"deny\""),
+            "npm must not be denied wholesale now that the registry is allowlisted"
+        );
+        assert!(config.contains("\"npm install*\": \"ask\""));
+        assert!(config.contains("\"pnpm add*\": \"ask\""));
+        assert!(config.contains("\"**/pnpm-lock.yaml\": \"ask\""));
+    }
+
+    /// The Containerfile has to keep the supply-chain defaults in place: a
+    /// one-week cooldown for npm, pnpm, and uv, pnpm failing closed on too-new
+    /// versions, no trust downgrade, exotic transitive sources blocked, and npm
+    /// lifecycle scripts disabled.
+    #[test]
+    fn containerfile_sets_dependency_safety_defaults() {
+        let file = include_str!("assets/Containerfile");
+        assert!(file.contains("minimumReleaseAge: 10080"));
+        assert!(file.contains("minimumReleaseAgeStrict: true"));
+        assert!(file.contains("trustPolicy: no-downgrade"));
+        assert!(file.contains("blockExoticSubdeps: true"));
+        assert!(file.contains("min-release-age=7"));
+        assert!(file.contains("ignore-scripts=true"));
+        assert!(file.contains("exclude-newer = \"7 days\""));
+    }
+
+    /// The wasm toolchain has to be baked in. The target's std is a rustup
+    /// component, and static.rust-lang.org is not on the egress allowlist, so
+    /// the agent cannot add it at runtime — an image without these lines can
+    /// never compile to wasm.
+    #[test]
+    fn containerfile_installs_wasm_toolchain() {
+        let file = include_str!("assets/Containerfile");
+        assert!(file.contains("rustup target add wasm32-unknown-unknown"));
+        assert!(file.contains("wasm-pack"));
+        assert!(file.contains("wasm-bindgen-cli"));
     }
 }

@@ -27,14 +27,20 @@ github.com
 raw.githubusercontent.com
 
 # Package registries, so dependency lookups and installs have somewhere to go.
-# Cargo and pip are also gated by the agent's permission rules; the npm registry
-# is deliberately absent — npm has no dependency-review guard, so it is refused.
+# Cargo and pip are also gated by the agent's permission rules. npm has no
+# dependency-review guard, so it is not gated by an absent domain: installs are
+# gated by "ask" rules in opencode.json instead.
 crates.io
 .crates.io
 static.crates.io
 index.crates.io
 pypi.org
 files.pythonhosted.org
+
+# npm registry and the Node distribution (fnm fetches Node from nodejs.org).
+registry.npmjs.org
+nodejs.org
+.nodejs.org
 
 # Web search. Tavily's hosted MCP server, which the agent reaches through the
 # configured Tavily MCP tool; search/extract/map/crawl happen server-side.

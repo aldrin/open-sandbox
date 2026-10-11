@@ -8,8 +8,10 @@ Ubuntu container VM running as the unprivileged user `agent`.
 `/home/agent/code` is a persistent volume mount of the host project — work
 there. Everything else in the container is ephemeral. Shell is bash.
 Installed tooling: `git`, `rg` (ripgrep), `jq`, `gcc`, `make`; Rust (`cargo`,
-`rustc`, `rust-analyzer`, `clippy`, `rustfmt`, `cargo-fuzz`, `cargo-llvm-cov`);
-Python (`python3`, `uv`, `basedpyright`); `duckdb`; `pandoc` and `typst` for
+`rustc`, `rust-analyzer`, `clippy`, `rustfmt`, `cargo-fuzz`, `cargo-llvm-cov`,
+`wasm-pack`, `wasm-bindgen`);
+Python (`python3`, `uv`, `basedpyright`); TypeScript (`node`, `pnpm`, `tsc`,
+`biome`, `typescript-language-server`); `duckdb`; `pandoc` and `typst` for
 document/PDF generation; `emacs`.
 
 ## Intent
@@ -59,10 +61,9 @@ Avoid listing implementation details; the code speaks for itself.
 ## Dependencies
 
 Always ask before adding a new dependency to any project. The user reviews all
-dependencies before they are added. Cargo and pip are on the egress allowlist
-and gated by the agent's permission rules, but adding a dependency is a review
-decision, not a network one. The npm registry is not reachable: npm has no
-dependency-review guard, so it is not proxied.
+dependencies before they are added. Cargo, pip, and the npm registry are on the
+egress allowlist and gated by the agent's permission rules, but adding a
+dependency is a review decision, not a network one.
 
 ## Rust
 
@@ -72,9 +73,32 @@ Binaries are at:
 
 Never use `./target/` paths — `CARGO_TARGET_DIR` is set automatically.
 
+Build WebAssembly for the browser or JS with the preinstalled
+`wasm32-unknown-unknown` target: `cargo build --target wasm32-unknown-unknown`,
+or drive the full js/npm bundle with `wasm-pack build`. The target's std ships
+in the image, because `static.rust-lang.org` is not on the egress allowlist, so
+`rustup target add` cannot run at runtime.
+
 ## Python
 
-Use `uv` for all package management (`uv add`, `uv run`, `uv sync`).
+Use `uv` for all package management (`uv add`, `uv run`, `uv sync`). uv refuses
+to resolve a distribution uploaded in the last week; escape a single package
+with `exclude-newer-package` when a fix is urgent.
+
+## TypeScript
+
+Node LTS runs the show, managed by `fnm`; the package manager is `pnpm`. Add
+dependencies with `pnpm add`, type-check with `tsc --noEmit`, and lint and
+format with `biome`. Vite and Vitest are installed per project. Global tools
+land in `~/.local/bin`, and the pnpm store and npm cache live under `~/.cache`,
+so only project sources land on the mounted volume.
+
+Dependency installs are hardened by default. Both pnpm and npm refuse to
+resolve a version published in the last week; pnpm fails closed on too-new
+versions, refuses a trust downgrade, and blocks exotic (git/tarball)
+transitive sources; npm runs no lifecycle scripts. Override any of these only
+for a specific, deliberate reason, and expect installs of very new packages to
+fail until they are a week old.
 
 ## DuckDB
 

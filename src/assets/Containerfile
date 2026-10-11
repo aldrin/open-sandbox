@@ -7,8 +7,9 @@ FROM ubuntu:26.04
 ARG DEBIAN_FRONTEND=noninteractive
 
 # Install system-level dependencies for all sections below.
-#   Base:     curl, git, ca-certificates
-#   Agents:   ripgrep, jq, nodejs, npm
+#   Base:     curl, git, ca-certificates, unzip (fnm unzips its own release)
+#   Agents:   ripgrep, jq, nodejs, npm (system copies; the agent's own Node
+#             LTS arrives with fnm in the TypeScript section below)
 #   Egress:   nftables (firewall)
 #   Privdrop: util-linux (setpriv)
 #   Rust:     build-essential, pkg-config, libssl-dev
@@ -16,7 +17,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 #   Docs:     fonts-ibm-plex
 #   Editor:   emacs-nox
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl git ca-certificates \
+    curl git ca-certificates unzip \
     ripgrep jq nodejs npm \
     nftables \
     util-linux \
@@ -70,6 +71,15 @@ RUN rustup toolchain install nightly --component rust-src
 # cargo-fuzz for running fuzz targets; cargo-llvm-cov for code coverage
 RUN cargo install cargo-fuzz cargo-llvm-cov
 
+# Rust → WebAssembly. wasm-pack drives a build end to end, and wasm-bindgen-cli
+# produces the JS glue for #[wasm_bindgen] crates (its version has to match the
+# wasm-bindgen crate a project depends on). The target's std is a rustup
+# component, not a crate, so it is fetched here at build time: the agent's
+# egress allowlist has no static.rust-lang.org, so `rustup target add` would
+# fail at runtime.
+RUN rustup target add wasm32-unknown-unknown \
+    && cargo install wasm-pack wasm-bindgen-cli
+
 # Shared target directory keeps build artifacts out of the project volume
 ENV CARGO_TARGET_DIR="/home/agent/cargo-target"
 
@@ -86,6 +96,68 @@ ENV UV_CACHE_DIR="/home/agent/.cache/uv"
 RUN uv tool install basedpyright \
     && ln -s basedpyright-langserver /home/agent/.local/bin/pyright-langserver
 
+# A week-long cooldown, mirroring the npm/pnpm policy: uv will not resolve a
+# distribution uploaded in the last week. A project escapes one package with
+# exclude-newer-package in its pyproject.toml or uv.toml.
+RUN install -d /home/agent/.config/uv \
+    && printf '%s\n' 'exclude-newer = "7 days"' > /home/agent/.config/uv/uv.toml
+
+# =============================================================================
+# Node.js / TypeScript
+# =============================================================================
+#
+# fnm manages Node the way rustup manages Rust toolchains: the agent's own Node
+# LTS lives under its home, while the apt nodejs/npm above stay only to install
+# OpenCode into the system prefix later. The pnpm store and the npm cache go
+# under ~/.cache, mirroring UV_CACHE_DIR and CARGO_TARGET_DIR, so only project
+# sources land on the mounted volume.
+
+RUN curl -fsSL https://fnm.vercel.app/install \
+    | bash -s -- --install-dir /home/agent/.local/bin --skip-shell
+
+ENV FNM_DIR="/home/agent/.local/share/fnm"
+ENV NPM_CONFIG_PREFIX="/home/agent/.local"
+ENV NPM_CONFIG_CACHE="/home/agent/.cache/npm"
+ENV PNPM_HOME="/home/agent/.local/share/pnpm"
+# fnm's 'default' alias is the stable path to the selected Node, so node/npm
+# are on PATH without the shell hook `fnm env` would otherwise install.
+ENV PATH="/home/agent/.local/share/fnm/aliases/default/bin:/home/agent/.local/share/pnpm:/home/agent/.local/bin:/home/agent/.cargo/bin:${PATH}"
+
+# Install the current Node LTS and point the 'default' alias at it. fnm resolves
+# the alias from an installed version, so name it explicitly rather than asking
+# for the 'lts-latest' alias, which does not exist until a default is set.
+RUN fnm install --lts \
+    && fnm default "$(fnm ls | grep -oE 'v[0-9]+(\.[0-9]+){2}' | sort -V | tail -1)"
+
+# TypeScript 7 (the native tsgo compiler), the language server OpenCode drives
+# for .ts files, Biome for lint + format, and pnpm as the project package
+# manager. Vite and Vitest are installed per project.
+RUN npm install -g \
+      typescript \
+      typescript-language-server \
+      @biomejs/biome \
+      pnpm \
+    && npm cache clean --force
+
+# Safe supply-chain defaults. A newly published version is the shape of most
+# npm attacks, so neither manager resolves a version younger than a week, and
+# pnpm additionally fails closed rather than silently substituting an older one,
+# refuses a trust downgrade, and keeps exotic (git/tarball) transitive sources
+# out. npm has no per-package script allowlist, so it simply runs none.
+# pnpm's window is minutes and, since v11, lives in its global config.yaml
+# rather than .npmrc; npm's is days and lives in .npmrc.
+RUN install -d /home/agent/.config/pnpm \
+    && printf '%s\n' \
+         'minimumReleaseAge: 10080' \
+         'minimumReleaseAgeStrict: true' \
+         'trustPolicy: no-downgrade' \
+         'blockExoticSubdeps: true' \
+         > /home/agent/.config/pnpm/config.yaml \
+    && printf '%s\n' \
+         'min-release-age=7' \
+         'ignore-scripts=true' \
+         > /home/agent/.npmrc
+
 # =============================================================================
 # DuckDB
 # =============================================================================
@@ -98,9 +170,13 @@ RUN curl https://install.duckdb.org | sh
 
 USER root
 
-# OpenCode comes from npm so it lands in /usr/local, root-owned and out of the
-# agent's reach.
-RUN npm install -g opencode-ai \
+# The agent's npm prefix points at its own home; root instead installs OpenCode
+# into the system prefix, so the tree stays root-owned and out of the agent's
+# reach. These are scoped to the RUN rather than set with ENV, since ENV is
+# image-wide and would otherwise overwrite the agent's prefix for the final
+# image.
+RUN NPM_CONFIG_PREFIX=/usr/local NPM_CONFIG_CACHE=/root/.npm \
+      npm install -g opencode-ai \
     && npm cache clean --force
 
 # OpenCode Power Pack: source of the code-review, security-review, and related
@@ -109,7 +185,8 @@ RUN npm install -g opencode-ai \
 # them at startup; opencode.json selects the specific skill directories it wants
 # under skills.paths, so the rest of the catalog stays out of context. Tracks the
 # latest release, so a rebuild picks up the newest skill content.
-RUN npm install -g @waybarrios/opencode-power-pack@latest \
+RUN NPM_CONFIG_PREFIX=/usr/local NPM_CONFIG_CACHE=/root/.npm \
+      npm install -g @waybarrios/opencode-power-pack@latest \
     && npm cache clean --force
 
 # =============================================================================

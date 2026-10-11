@@ -88,10 +88,25 @@
       "pip install*": "ask",
       "pip3 install*": "ask",
 
-      "npm*": "deny",
-      "npx*": "deny",
-      "pnpm*": "deny",
-      "yarn*": "deny"
+      "npm install*": "ask",
+      "npm i *": "ask",
+      "npm ci*": "ask",
+      "npm add*": "ask",
+      "npm uninstall*": "ask",
+      "npm update*": "ask",
+      "npm link*": "ask",
+      "npx*": "ask",
+      "pnpm install*": "ask",
+      "pnpm i *": "ask",
+      "pnpm add*": "ask",
+      "pnpm remove*": "ask",
+      "pnpm update*": "ask",
+      "pnpm link*": "ask",
+      "pnpm dlx*": "ask",
+      "yarn add*": "ask",
+      "yarn install*": "ask",
+      "yarn remove*": "ask",
+      "corepack*": "ask"
     },
     "edit": {
       "*": "allow",
@@ -101,7 +116,10 @@
       "**/uv.lock": "ask",
       "**/requirements*.txt": "ask",
       "**/package.json": "ask",
-      "**/package-lock.json": "ask"
+      "**/package-lock.json": "ask",
+      "**/pnpm-lock.yaml": "ask",
+      "**/yarn.lock": "ask",
+      "**/tsconfig.json": "ask"
     },
     "external_directory": "deny"
   }

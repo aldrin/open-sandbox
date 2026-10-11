@@ -72,9 +72,15 @@ for cmd, label in [
     (["rust-analyzer", "--version"], "rust-analyzer"),
     (["cargo", "clippy", "--version"], "Clippy"),
     (["rustfmt", "--version"], "rustfmt"),
+    (["wasm-pack", "--version"], "wasm-pack"),
+    (["wasm-bindgen", "--version"], "wasm-bindgen"),
     (["python3", "--version"], "Python"),
     (["uv", "--version"], "uv"),
     (["basedpyright", "--version"], "basedpyright"),
+    (["pnpm", "--version"], "pnpm"),
+    (["tsc", "--version"], "TypeScript compiler"),
+    (["biome", "--version"], "Biome"),
+    (["typescript-language-server", "--version"], "TypeScript language server"),
     (["duckdb", "--version"], "DuckDB"),
     (["pandoc", "--version"], "Pandoc"),
     (["typst", "--version"], "Typst"),
@@ -86,6 +92,20 @@ for cmd, label in [
 ]:
     ok, version = version_of(cmd)
     check(ok, label, version)
+
+# wasm builds need the target's std, which rustup installs as a component
+# rather than a crate. The image bakes it in; the agent cannot add it, since
+# static.rust-lang.org is not on the egress allowlist.
+try:
+    installed = subprocess.run(
+        ["rustup", "target", "list", "--installed"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    ).stdout
+    check("wasm32-unknown-unknown" in installed, "wasm32-unknown-unknown target")
+except (OSError, subprocess.SubprocessError) as e:
+    check(False, "wasm32-unknown-unknown target", type(e).__name__)
 
 
 # ── 3. Agent configuration ────────────────────────────────────────────
@@ -155,6 +175,9 @@ heading("Runtime environment is configured")
 
 for var, expected in [
     ("CARGO_TARGET_DIR", "/home/agent/cargo-target"),
+    ("FNM_DIR", "/home/agent/.local/share/fnm"),
+    ("NPM_CONFIG_PREFIX", "/home/agent/.local"),
+    ("PNPM_HOME", "/home/agent/.local/share/pnpm"),
     ("TMPDIR", "/tmp/agent"),
     ("EDITOR", "emacs"),
     ("TERM", "xterm-256color"),
@@ -162,6 +185,51 @@ for var, expected in [
 ]:
     val = os.environ.get(var)
     check(val == expected, f"{var}={expected}", f"actual={val}")
+
+
+# ── 5. Dependency-install safety ──────────────────────────────────────
+#
+# A version published moments ago is the shape of most supply-chain attacks.
+# npm, pnpm, and uv all wait a week before resolving a new version; pnpm
+# additionally fails closed, refuses a trust downgrade, and blocks exotic
+# transitive sources, while npm runs no lifecycle scripts at all.
+
+heading("Dependency-install safety is configured")
+
+for path, needle, label in [
+    ("/home/agent/.npmrc", "min-release-age=7", "npm cooldown (7 days)"),
+    ("/home/agent/.npmrc", "ignore-scripts=true", "npm lifecycle scripts disabled"),
+    (
+        "/home/agent/.config/pnpm/config.yaml",
+        "minimumReleaseAge: 10080",
+        "pnpm cooldown (7 days)",
+    ),
+    (
+        "/home/agent/.config/pnpm/config.yaml",
+        "minimumReleaseAgeStrict: true",
+        "pnpm cooldown fails closed",
+    ),
+    (
+        "/home/agent/.config/pnpm/config.yaml",
+        "trustPolicy: no-downgrade",
+        "pnpm refuses a trust downgrade",
+    ),
+    (
+        "/home/agent/.config/pnpm/config.yaml",
+        "blockExoticSubdeps: true",
+        "pnpm blocks exotic transitive sources",
+    ),
+    (
+        "/home/agent/.config/uv/uv.toml",
+        'exclude-newer = "7 days"',
+        "uv cooldown (7 days)",
+    ),
+]:
+    try:
+        with open(path) as f:
+            check(needle in f.read(), label, path)
+    except OSError as e:
+        check(False, label, f"{type(e).__name__}: {e}")
 
 
 # ── Summary ────────────────────────────────────────────────────────────
