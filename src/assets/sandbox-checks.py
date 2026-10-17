@@ -3,7 +3,7 @@
 
 Run inside the container by asking the agent to execute it:
 
-    python3 ~/sandbox-checks.py
+    python3 /usr/local/lib/open-sandbox/sandbox-checks.py
 
 Everything here is probed from the agent's own position: as the unprivileged
 'agent' user, with whatever environment the entrypoint handed over. Nothing is
@@ -13,7 +13,7 @@ checks confirm the effect instead.
 To run without the entrypoint (override it on the host):
 
     container run --rm -it --entrypoint /bin/bash -v ...  <image>
-    python3 /home/agent/sandbox-checks.py
+    python3 /usr/local/lib/open-sandbox/sandbox-checks.py
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from __future__ import annotations
 import os
 import pwd
 import socket
-import stat
 import subprocess
 import sys
 from urllib.parse import urlparse
@@ -82,6 +81,7 @@ for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
     print(f"    {var}={os.environ.get(var, '<unset>')}")
 
 print("\n  Allowlist:\n")
+rules: list[str] = []
 try:
     with open(ALLOWLIST_PATH) as f:
         rules = [
@@ -194,6 +194,19 @@ check(code == 403, "host outside the allowlist is refused (example.com:443)", st
 code, status = proxy_connect("openrouter.ai:22")
 check(code == 403, "non-web port is refused (openrouter.ai:22)", status)
 
+# If the workspace enables the Mac-host model, the proxy must route it. A 403
+# means the allowlist or the non-public-address exception is missing; a 502
+# means the route is allowed but the model server is not running.
+host_rules = [rule for rule in rules if rule.startswith("host.container.internal:")]
+if host_rules:
+    target = host_rules[0]
+    code, status = proxy_connect(target)
+    check(
+        code in (200, 502),
+        f"local host service is routed through the proxy ({target})",
+        status,
+    )
+
 
 heading("Proxy environment points at the proxy", "proxy_env")
 
@@ -278,20 +291,26 @@ for path in [
     check_writable(path, expect_writable=True)
 
 
-# ── 6. Configuration is out of reach ─────────────────────────────────
+# ── 6. Configuration is read-only ────────────────────────────────────
 #
-# Config files are root-owned, so this user cannot rewrite them in place.
-# Their parent directories carry the sticky bit, so it cannot delete or
-# rename its way around them either.
+# These files are root-owned, so this user cannot edit them. That guards
+# against accidental edits. The OpenCode config sits in ~/.config, which this
+# user owns, so a deliberate agent could still rename the directory aside and
+# write its own; the firewall and proxy are what that cannot get around. The
+# files under /etc and /usr/local are in root-owned directories as well.
 
-heading("Agent configuration is protected", "config")
+heading("Agent configuration is read-only", "config")
 
 for path in [
     ALLOWLIST_PATH,
+    "/home/agent/.config/opencode",
     "/home/agent/.config/opencode/opencode.json",
     "/home/agent/.config/opencode/AGENTS.md",
     "/usr/local/bin/open-sandbox-entrypoint",
+    "/usr/local/lib/open-sandbox",
     "/usr/local/lib/open-sandbox/egress-proxy.py",
+    "/usr/local/lib/open-sandbox/sandbox-checks.py",
+    "/usr/local/lib/open-sandbox/sandbox-tools.py",
 ]:
     try:
         st = os.stat(path)
@@ -305,31 +324,6 @@ for path in [
         f"{path} is root-owned and read-only",
         f"uid={st.st_uid} writable={writable}",
     )
-
-for path in ["/home/agent", "/home/agent/.config"]:
-    try:
-        mode = os.stat(path).st_mode
-    except OSError as e:
-        check(False, f"{path} has the sticky bit", type(e).__name__)
-        continue
-    check(bool(mode & stat.S_ISVTX), f"{path} has the sticky bit", oct(mode & 0o7777))
-
-# The file checks above only hold if the directory around them cannot be
-# written, renamed, or removed. The sticky bits on the home and .config
-# directories are not that protection: both are owned by the agent, so it may
-# create and delete entries within them regardless. What actually keeps the
-# config out of reach is that its own directory is root-owned and not writable.
-try:
-    opendir = "/home/agent/.config/opencode"
-    st = os.stat(opendir)
-    writable = os.access(opendir, os.W_OK)
-    check(
-        st.st_uid == 0 and not writable,
-        f"{opendir} is root-owned and read-only",
-        f"uid={st.st_uid} writable={writable}",
-    )
-except OSError as e:
-    check(False, "/home/agent/.config/opencode is root-owned and read-only", type(e).__name__)
 
 
 # ── 7. Process and localhost ─────────────────────────────────────────
@@ -431,7 +425,7 @@ print(f"  Direct egress:  {_ok('direct'):4s}  DNS and raw TCP dropped")
 print(f"  Proxy:          {_proxy:4s}  allowlist enforced, env routed")
 print(f"  Credentials:    {_ok('creds'):4s}  not in the environment")
 print(f"  Filesystem:     {_fs:4s}  system read-only, workdir writable")
-print(f"  Configuration:  {_ok('config'):4s}  root-owned, parent unwritable")
+print(f"  Configuration:  {_ok('config'):4s}  root-owned, read-only")
 print(f"  Process:        {_ok('process'):4s}  unprivileged, no caps")
 print(f"  Ownership:      {_ok('ownership'):4s}  system files root-owned")
 print(f"  Localhost:      {_ok('local_bind'):4s}  bind() to 127.0.0.1 works")

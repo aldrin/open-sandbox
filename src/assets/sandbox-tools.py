@@ -3,7 +3,7 @@
 
 Run inside the container by asking the agent to execute it:
 
-    python3 ~/sandbox-tools.py
+    python3 /usr/local/lib/open-sandbox/sandbox-tools.py
 """
 
 from __future__ import annotations
@@ -119,18 +119,20 @@ heading("OpenCode configuration is in place")
 for path, label in [
     (CONFIG_PATH, "OpenCode config"),
     ("/home/agent/.config/opencode/AGENTS.md", "OpenCode context file"),
-    ("/home/agent/.config/opencode/command", "OpenCode commands"),
+    ("/home/agent/.config/opencode/commands", "OpenCode commands"),
+    ("/home/agent/.config/opencode/cli.json", "OpenCode CLI settings"),
     (AUTH_PATH, "OpenCode credentials"),
+    ("/home/agent/.local/share/opencode/openrouter-key", "OpenRouter key file"),
     (ALLOWLIST_PATH, "Egress allowlist"),
 ]:
     check(os.path.exists(path), label, path)
 
 
-heading("OpenCode is pointed at OpenRouter")
+heading("OpenCode is configured for OpenRouter and the host model")
 
-# The auth file is the one thing here that is a runtime effect: the
-# entrypoint writes it on every start, so its absence means the entrypoint
-# did not run, which means the firewall did not either.
+# The credential files are the runtime effect here: the entrypoint writes them
+# on every start, so their absence means the entrypoint did not run, which
+# means the firewall did not either.
 try:
     with open(AUTH_PATH) as f:
         auth = json.load(f)
@@ -142,7 +144,22 @@ try:
 except (OSError, ValueError) as e:
     check(False, "OpenCode has an openrouter credential", f"{type(e).__name__}: {e}")
 
-# The two below read the config the image shipped, so they report what
+
+def host_service_port() -> int | None:
+    """Return the port of the host.container.internal allowlist entry."""
+    prefix = "host.container.internal:"
+    try:
+        with open(ALLOWLIST_PATH) as f:
+            for line in f:
+                entry = line.split("#", 1)[0].strip().lower()
+                if entry.startswith(prefix):
+                    return int(entry[len(prefix) :])
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+# The checks below read the config the image shipped, so they report what
 # OpenCode was *configured* to do, not what it resolved at runtime. What
 # actually confines egress is the proxy, and sandbox-checks.py proves that
 # by effect: any host off the allowlist is refused.
@@ -150,20 +167,72 @@ try:
     with open(CONFIG_PATH) as f:
         oc_config = json.load(f)
 
+    providers = oc_config.get("enabled_providers", [])
     check(
-        oc_config.get("enabled_providers") == ["openrouter"],
-        "openrouter is configured as the only provider",
-        f"enabled_providers={oc_config.get('enabled_providers')}",
+        "openrouter" in providers and set(providers) <= {"openrouter", "mlx"},
+        "openrouter is enabled; local mlx is the only other provider",
+        f"enabled_providers={providers}",
     )
 
+    openrouter = oc_config.get("providers", {}).get("openrouter", {})
+    api_key = openrouter.get("settings", {}).get("apiKey", "")
+    check(
+        api_key == "{file:/home/agent/.local/share/opencode/openrouter-key}",
+        "the openrouter key is read from its key file",
+        f"apiKey={api_key or '<unset>'}",
+    )
+
+    port = host_service_port()
+    mlx = oc_config.get("providers", {}).get("mlx", {})
+    base_url = mlx.get("settings", {}).get("baseURL", "")
+    if port is not None:
+        expected_base_url = f"http://host.container.internal:{port}/v1"
+        check(
+            base_url == expected_base_url,
+            "the mlx provider points at the allowlisted host integration address",
+            f"baseURL={base_url or '<unset>'} expected={expected_base_url}",
+        )
+    if mlx:
+        check(
+            mlx.get("package") == "aisdk:@ai-sdk/openai-compatible",
+            "the mlx provider uses the v2 OpenAI-compatible package",
+            f"package={mlx.get('package', '<unset>')}",
+        )
+
     # A default model is pinned so a session starts on DeepSeek Flash Latest
-    # without a picker, and /models or --model still switch it. Whatever is
-    # pinned has to be an OpenRouter model: nothing else is reachable.
+    # without a picker, and /models still switches it. Whatever is pinned has
+    # to be an OpenRouter model: nothing else is reachable without the host
+    # endpoint.
     model = str(oc_config.get("model", ""))
     check(
         model.startswith("openrouter/"),
         "the default model is an OpenRouter model",
         f"model={model or '<unpinned>'}",
+    )
+    title_model = str(oc_config.get("agents", {}).get("title", {}).get("model", ""))
+    check(
+        title_model.startswith("openrouter/"),
+        "the title agent uses an OpenRouter model",
+        f"model={title_model or '<unpinned>'}",
+    )
+
+    tavily = oc_config.get("mcp", {}).get("servers", {}).get("tavily", {})
+    check(
+        bool(tavily),
+        "the Tavily MCP server is configured under mcp.servers",
+        f"keys={list(oc_config.get('mcp', {}).get('servers', {}))}",
+    )
+
+    permissions = oc_config.get("permissions", [])
+    check(
+        any(
+            isinstance(rule, dict)
+            and rule.get("action") == "external_directory"
+            and rule.get("effect") == "deny"
+            for rule in permissions
+        ),
+        "external directory access is denied",
+        f"rules={len(permissions)}",
     )
 except (OSError, ValueError) as e:
     check(False, "OpenCode config is readable and valid JSON", f"{type(e).__name__}: {e}")

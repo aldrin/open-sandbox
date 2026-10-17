@@ -1,10 +1,14 @@
 # Domains the sandboxed agent may reach, one per line.
 #
 # A bare name matches that host exactly. A leading dot matches the domain and
-# every subdomain. Blank lines and lines starting with '#' are ignored. Only
-# ports 80 and 443 are proxied; everything else is refused regardless of host.
+# every subdomain. A name with an explicit port, such as
+# 'host.container.internal:27182', is a host service: it is allowed on that port
+# only, and the proxy may dial a non-public address for it (here, the Mac's
+# address on the container network). Blank lines and lines starting with '#' are
+# ignored. Only ports 80 and 443 are proxied for ordinary names; host services
+# use the port they name.
 #
-# This file is the whole allowlist. Nothing else gets out: the firewall drops
+# This file is the whole allowlist. No other host is reachable: the firewall drops
 # every packet the agent sends directly, so a host that is not named here is
 # unreachable even by IP address.
 
@@ -44,4 +48,13 @@ nodejs.org
 
 # Web search. Tavily's hosted MCP server, which the agent reaches through the
 # configured Tavily MCP tool; search/extract/map/crawl happen server-side.
+# Because Tavily fetches pages for the agent, this entry reaches any URL the
+# agent names, not just Tavily. Remove it to keep egress to the hosts listed.
 mcp.tavily.com
+
+# Local model on the Mac host. The entrypoint maps host.container.internal to
+# the Mac's container network address, where mlx_lm.server must listen on
+# port 27182 (see README). The explicit port marks this as a host service, so
+# the proxy dials that non-public address, and only on port 27182. Remove this
+# line to turn local models off.
+host.container.internal:27182

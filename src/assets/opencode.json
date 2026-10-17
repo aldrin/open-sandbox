@@ -1,126 +1,145 @@
 {
   "$schema": "https://opencode.ai/config.json",
 
-  "enabled_providers": ["openrouter"],
+  "enabled_providers": ["openrouter", "mlx"],
 
   "model": "openrouter/~deepseek/deepseek-flash-latest",
-  "small_model": "openrouter/~deepseek/deepseek-flash-latest",
+
+  "agents": {
+    "title": {
+      "model": "openrouter/~deepseek/deepseek-flash-latest"
+    }
+  },
 
   "instructions": ["/home/agent/.config/opencode/AGENTS.md"],
 
-  "skills": {
-    "paths": [
-      "/usr/local/lib/node_modules/@waybarrios/opencode-power-pack/skills/code-reviewer",
-      "/usr/local/lib/node_modules/@waybarrios/opencode-power-pack/skills/security-review",
-      "/usr/local/lib/node_modules/@waybarrios/opencode-power-pack/skills/vuln-report",
-      "/usr/local/lib/node_modules/@waybarrios/opencode-power-pack/skills/ai-slop"
-    ]
-  },
+  "skills": [
+    "/usr/local/lib/node_modules/@waybarrios/opencode-power-pack/skills/code-reviewer",
+    "/usr/local/lib/node_modules/@waybarrios/opencode-power-pack/skills/security-review",
+    "/usr/local/lib/node_modules/@waybarrios/opencode-power-pack/skills/vuln-report",
+    "/usr/local/lib/node_modules/@waybarrios/opencode-power-pack/skills/ai-slop"
+  ],
 
-  "autoupdate": false,
+  "update": "disable",
   "share": "disabled",
 
-  "experimental": {
-    "openTelemetry": false
-  },
-
   "formatter": true,
-  "lsp": true,
 
-  "provider": {
+  "providers": {
     "openrouter": {
+      "settings": {
+        "apiKey": "{file:/home/agent/.local/share/opencode/openrouter-key}"
+      },
       "models": {
         "~deepseek/deepseek-flash-latest": {},
         "~deepseek/deepseek-pro-latest": {}
+      }
+    },
+    "mlx": {
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "name": "MLX (Mac host)",
+      "settings": {
+        "baseURL": "http://host.container.internal:27182/v1",
+        "apiKey": "not-needed"
+      },
+      "models": {
+        "default_model": {
+          "name": "MLX (Mac host)",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          },
+          "variants": [
+            {
+              "id": "think",
+              "body": { "chat_template_kwargs": { "enable_thinking": true } }
+            }
+          ]
+        }
       }
     }
   },
 
   "mcp": {
-    "tavily": {
-      "type": "remote",
-      "url": "https://mcp.tavily.com/mcp/",
-      "oauth": false,
-      "enabled": true,
-      "headers": {
-        "Authorization": "Bearer {file:/home/agent/.local/share/opencode/tavily-key}"
+    "servers": {
+      "tavily": {
+        "type": "remote",
+        "url": "https://mcp.tavily.com/mcp/",
+        "oauth": false,
+        "headers": {
+          "Authorization": "Bearer {file:/home/agent/.local/share/opencode/tavily-key}"
+        }
       }
     }
   },
 
-  "permission": {
-    "*": "allow",
-    "bash": {
-      "*": "allow",
+  "permissions": [
+    { "action": "external_directory", "resource": "*", "effect": "deny" },
 
-      "git commit*": "deny",
-      "git push*": "deny",
-      "git rebase*": "deny",
-      "git merge*": "deny",
-      "git cherry-pick*": "deny",
-      "git revert*": "deny",
-      "git reset*": "deny",
-      "git checkout*": "deny",
-      "git switch*": "deny",
-      "git restore*": "deny",
-      "git branch*": "deny",
-      "git tag*": "deny",
-      "git stash*": "deny",
-      "git clean*": "deny",
-      "git am*": "deny",
-      "git apply*": "deny",
-      "git filter-branch*": "deny",
-      "git update-ref*": "deny",
-      "git reflog*": "deny",
-      "git gc*": "deny",
-      "git worktree*": "deny",
-      "git fetch*": "deny",
-      "git pull*": "deny",
-      "git clone*": "deny",
-      "git submodule*": "deny",
+    { "action": "shell", "resource": "git commit*", "effect": "deny" },
+    { "action": "shell", "resource": "git push*", "effect": "deny" },
+    { "action": "shell", "resource": "git rebase*", "effect": "deny" },
+    { "action": "shell", "resource": "git merge*", "effect": "deny" },
+    { "action": "shell", "resource": "git cherry-pick*", "effect": "deny" },
+    { "action": "shell", "resource": "git revert*", "effect": "deny" },
+    { "action": "shell", "resource": "git reset*", "effect": "deny" },
+    { "action": "shell", "resource": "git checkout*", "effect": "deny" },
+    { "action": "shell", "resource": "git switch*", "effect": "deny" },
+    { "action": "shell", "resource": "git restore*", "effect": "deny" },
+    { "action": "shell", "resource": "git branch*", "effect": "deny" },
+    { "action": "shell", "resource": "git tag*", "effect": "deny" },
+    { "action": "shell", "resource": "git stash*", "effect": "deny" },
+    { "action": "shell", "resource": "git clean*", "effect": "deny" },
+    { "action": "shell", "resource": "git am*", "effect": "deny" },
+    { "action": "shell", "resource": "git apply*", "effect": "deny" },
+    { "action": "shell", "resource": "git filter-branch*", "effect": "deny" },
+    { "action": "shell", "resource": "git update-ref*", "effect": "deny" },
+    { "action": "shell", "resource": "git reflog*", "effect": "deny" },
+    { "action": "shell", "resource": "git gc*", "effect": "deny" },
+    { "action": "shell", "resource": "git worktree*", "effect": "deny" },
+    { "action": "shell", "resource": "git fetch*", "effect": "deny" },
+    { "action": "shell", "resource": "git pull*", "effect": "deny" },
+    { "action": "shell", "resource": "git clone*", "effect": "deny" },
+    { "action": "shell", "resource": "git submodule*", "effect": "deny" },
 
-      "cargo add*": "ask",
-      "cargo remove*": "ask",
-      "cargo install*": "ask",
-      "uv add*": "ask",
-      "uv remove*": "ask",
-      "uv pip install*": "ask",
-      "pip install*": "ask",
-      "pip3 install*": "ask",
+    { "action": "shell", "resource": "cargo add*", "effect": "ask" },
+    { "action": "shell", "resource": "cargo remove*", "effect": "ask" },
+    { "action": "shell", "resource": "cargo install*", "effect": "ask" },
+    { "action": "shell", "resource": "uv add*", "effect": "ask" },
+    { "action": "shell", "resource": "uv remove*", "effect": "ask" },
+    { "action": "shell", "resource": "uv pip install*", "effect": "ask" },
+    { "action": "shell", "resource": "pip install*", "effect": "ask" },
+    { "action": "shell", "resource": "pip3 install*", "effect": "ask" },
 
-      "npm install*": "ask",
-      "npm i *": "ask",
-      "npm ci*": "ask",
-      "npm add*": "ask",
-      "npm uninstall*": "ask",
-      "npm update*": "ask",
-      "npm link*": "ask",
-      "npx*": "ask",
-      "pnpm install*": "ask",
-      "pnpm i *": "ask",
-      "pnpm add*": "ask",
-      "pnpm remove*": "ask",
-      "pnpm update*": "ask",
-      "pnpm link*": "ask",
-      "pnpm dlx*": "ask",
-      "yarn add*": "ask",
-      "yarn install*": "ask",
-      "yarn remove*": "ask",
-      "corepack*": "ask"
-    },
-    "edit": {
-      "*": "allow",
-      "**/Cargo.toml": "ask",
-      "**/Cargo.lock": "ask",
-      "**/pyproject.toml": "ask",
-      "**/uv.lock": "ask",
-      "**/requirements*.txt": "ask",
-      "**/package.json": "ask",
-      "**/package-lock.json": "ask",
-      "**/pnpm-lock.yaml": "ask",
-      "**/yarn.lock": "ask",
-      "**/tsconfig.json": "ask"
-    },
-    "external_directory": "deny"
-  }
+    { "action": "shell", "resource": "npm install*", "effect": "ask" },
+    { "action": "shell", "resource": "npm i *", "effect": "ask" },
+    { "action": "shell", "resource": "npm ci*", "effect": "ask" },
+    { "action": "shell", "resource": "npm add*", "effect": "ask" },
+    { "action": "shell", "resource": "npm uninstall*", "effect": "ask" },
+    { "action": "shell", "resource": "npm update*", "effect": "ask" },
+    { "action": "shell", "resource": "npm link*", "effect": "ask" },
+    { "action": "shell", "resource": "npx*", "effect": "ask" },
+    { "action": "shell", "resource": "pnpm install*", "effect": "ask" },
+    { "action": "shell", "resource": "pnpm i *", "effect": "ask" },
+    { "action": "shell", "resource": "pnpm add*", "effect": "ask" },
+    { "action": "shell", "resource": "pnpm remove*", "effect": "ask" },
+    { "action": "shell", "resource": "pnpm update*", "effect": "ask" },
+    { "action": "shell", "resource": "pnpm link*", "effect": "ask" },
+    { "action": "shell", "resource": "pnpm dlx*", "effect": "ask" },
+    { "action": "shell", "resource": "yarn add*", "effect": "ask" },
+    { "action": "shell", "resource": "yarn install*", "effect": "ask" },
+    { "action": "shell", "resource": "yarn remove*", "effect": "ask" },
+    { "action": "shell", "resource": "corepack*", "effect": "ask" },
+
+    { "action": "edit", "resource": "**/Cargo.toml", "effect": "ask" },
+    { "action": "edit", "resource": "**/Cargo.lock", "effect": "ask" },
+    { "action": "edit", "resource": "**/pyproject.toml", "effect": "ask" },
+    { "action": "edit", "resource": "**/uv.lock", "effect": "ask" },
+    { "action": "edit", "resource": "**/requirements*.txt", "effect": "ask" },
+    { "action": "edit", "resource": "**/package.json", "effect": "ask" },
+    { "action": "edit", "resource": "**/package-lock.json", "effect": "ask" },
+    { "action": "edit", "resource": "**/pnpm-lock.yaml", "effect": "ask" },
+    { "action": "edit", "resource": "**/yarn.lock", "effect": "ask" },
+    { "action": "edit", "resource": "**/tsconfig.json", "effect": "ask" }
+  ]
 }

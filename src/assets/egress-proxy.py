@@ -6,29 +6,38 @@ off the machine. The agent has no direct network access at all, so this
 process is the sole path out, and it forwards only to hosts named in
 /etc/open-sandbox/allowlist.txt.
 
+An allowlist entry of the form 'host:port' is a host service: it is allowed
+on that port only, and the proxy may dial a non-public address for it. That
+is how a model server on the Mac host is reached at host.container.internal,
+which the entrypoint maps to the Mac's container network address, without
+opening private networks generally.
+
 Supports the two things a proxy client actually sends:
 
   CONNECT host:port      tunnels bytes after a 200, used for every https URL
   GET http://host/path   absolute-form plain HTTP, rewritten to origin form
 
-Everything else is refused. Every decision is logged as a single JSON object
-per line (JSON Lines) to stdout. The entrypoint redirects stdout to a file
-inside the mounted project directory so the host can read it and query it with
-DuckDB, e.g.:
+Everything else is refused, with a short plain-text reason the client can
+show.
 
-  duckdb -c "SELECT * FROM read_json_auto('.open-sandbox/egress.jsonl')"
+What this decides is which hosts the container connects to, by name and port.
+It does not inspect what is sent: a CONNECT tunnel is relayed as opaque bytes,
+so the TLS inside it is between the client and the server. Nor does it limit
+where data ends up. An allowlisted service that fetches URLs on request, as
+Tavily's extract tool does, reaches whatever the agent asks it to.
+
+Nothing is logged. Only a failure to start is reported, on stderr.
 """
 
 from __future__ import annotations
 
 import ipaddress
-import json
 import os
 import select
 import socket
 import socketserver
 import sys
-import time
+from typing import NoReturn
 from urllib.parse import urlsplit
 
 ALLOWLIST_PATH = os.environ.get("OPEN_SANDBOX_ALLOWLIST", "/etc/open-sandbox/allowlist.txt")
@@ -45,20 +54,27 @@ BUFSIZE = 65536
 # ── Allowlist ───────────────────────────────────────────────────────────────
 
 
-def load_allowlist(path: str) -> tuple[frozenset[str], tuple[str, ...]]:
-    """Parse the allowlist into (exact names, suffix rules).
+def load_allowlist(
+    path: str,
+) -> tuple[frozenset[str], tuple[str, ...], dict[str, frozenset[int]], frozenset[str]]:
+    """Parse the allowlist into (exact names, suffix rules, host services, bare hosts).
 
     A line starting with '.' is a suffix rule matching the domain and all of
-    its subdomains. Any other line is an exact host name.
+    its subdomains. A line of the form 'host:port' is a host service: it
+    matches that host on that port only, and the proxy may connect to a
+    non-public address for it. Any other line is an exact host name on the
+    default ports. A host named both with and without a port is reachable on
+    the default ports and on its explicit service ports.
     """
     exact: set[str] = set()
     suffixes: list[str] = []
+    services: dict[str, set[int]] = {}
+    bare: set[str] = set()
     try:
         with open(path) as f:
             lines = f.readlines()
     except OSError as e:
-        emit("FATAL", "allowlist_read", path=path, error_type=type(e).__name__, error=str(e))
-        raise SystemExit(1)
+        fail(f"cannot read the allowlist {path}: {e}")
 
     for line in lines:
         entry = line.split("#", 1)[0].strip().lower().rstrip(".")
@@ -66,9 +82,37 @@ def load_allowlist(path: str) -> tuple[frozenset[str], tuple[str, ...]]:
             continue
         if entry.startswith("."):
             suffixes.append(entry)
+            continue
+        host, port = parse_allowlist_entry(entry)
+        exact.add(host)
+        if port is not None:
+            services.setdefault(host, set()).add(port)
         else:
-            exact.add(entry)
-    return frozenset(exact), tuple(suffixes)
+            bare.add(host)
+    return (
+        frozenset(exact),
+        tuple(suffixes),
+        {host: frozenset(ports) for host, ports in services.items()},
+        frozenset(bare),
+    )
+
+
+def parse_allowlist_entry(entry: str) -> tuple[str, int | None]:
+    """Split an allowlist entry into (host, port), or (host, None).
+
+    Only a trailing ':number' is a port, so a bare host and a bracketed IPv6
+    literal are both treated as plain entries.
+    """
+    if entry.startswith("["):
+        close = entry.find("]")
+        rest = entry[close + 1 :] if close != -1 else ""
+        if rest.startswith(":") and rest[1:].isdigit():
+            return entry[: close + 1], int(rest[1:])
+        return entry, None
+    host, sep, port = entry.rpartition(":")
+    if sep and port.isdigit():
+        return host, int(port)
+    return entry, None
 
 
 def host_allowed(host: str, exact: frozenset[str], suffixes: tuple[str, ...]) -> bool:
@@ -118,41 +162,9 @@ def is_public_ip(ip: object) -> bool:
     return addr.is_global and not addr.is_multicast
 
 
-# ── Logging ─────────────────────────────────────────────────────────────────
-#
-# Every event is emitted as a single JSON object per line (JSON Lines). The
-# common keys are:
-#
-#   ts        ISO-8601 UTC timestamp of the event
-#   level     one of FATAL, ERROR, WARN, ALLOW, DENY, INFO
-#   event     a stable machine-readable name for the kind of event
-#
-# Events that concern a specific request also carry the request's method, host,
-# port, and (for plain HTTP) path. Denials carry a human-readable `detail` and,
-# where known, a machine-comparable `reason`. `json.dumps` defaults to
-# ensure_ascii=True, so any byte decoded as latin-1 from a client survives the
-# JSON encoding without becoming invalid UTF-8.
-
-
-def emit(level: str, event: str, **fields: object) -> None:
-    """Write one JSON line for a single event.
-
-    `fields` must be JSON-serialisable. Values that are not (a socket address,
-    say) are stringified so a bad value never breaks the whole log stream.
-    """
-    record: dict[str, object] = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "level": level,
-        "event": event,
-    }
-    for key, value in fields.items():
-        try:
-            json.dumps(value)
-        except (TypeError, ValueError):
-            value = str(value)
-        record[key] = value
-    sys.stdout.write(json.dumps(record, sort_keys=True) + "\n")
-    sys.stdout.flush()
+def fail(message: str) -> NoReturn:
+    print(f"egress-proxy: {message}", file=sys.stderr, flush=True)
+    raise SystemExit(1)
 
 
 # ── Proxy ───────────────────────────────────────────────────────────────────
@@ -165,13 +177,16 @@ class Handler(socketserver.StreamRequestHandler):
     rbufsize = 0
     timeout = CONNECT_TIMEOUT
 
-    allowlist: tuple[frozenset[str], tuple[str, ...]] = (frozenset(), ())
+    allowlist: tuple[
+        frozenset[str], tuple[str, ...], dict[str, frozenset[int]], frozenset[str]
+    ] = (frozenset(), (), {}, frozenset())
 
     def handle(self) -> None:
         try:
             self._handle()
-        except (OSError, ValueError) as e:
-            emit("ERROR", "handler_error", error_type=type(e).__name__, error=str(e))
+        except (OSError, ValueError):
+            # A broken client or upstream connection ends that connection only.
+            pass
 
     def _handle(self) -> None:
         request_line = self._read_line()
@@ -238,6 +253,8 @@ class Handler(socketserver.StreamRequestHandler):
         except ValueError as e:
             self._refuse(400, "Bad Request", f"CONNECT {target}: {e}")
             return
+        # Hosts are matched case-insensitively, including host-service entries.
+        host = host.lower()
 
         if not self._permitted(host, port, f"CONNECT {target}"):
             return
@@ -246,7 +263,6 @@ class Handler(socketserver.StreamRequestHandler):
         if upstream is None:
             return
 
-        emit("ALLOW", "connect", method="CONNECT", host=host, port=port)
         self.connection.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
         self._relay(upstream)
 
@@ -294,15 +310,21 @@ class Handler(socketserver.StreamRequestHandler):
         forwarded.append("Connection: close")
 
         head = f"{method} {path} {version}\r\n" + "\r\n".join(forwarded) + "\r\n\r\n"
-        emit("ALLOW", "request", method=method, host=host, port=port, path=path)
         upstream.sendall(head.encode("latin-1"))
         self._relay(upstream)
 
     # ── Shared ──────────────────────────────────────────────────────────
 
     def _permitted(self, host: str, port: int, what: str) -> bool:
-        exact, suffixes = self.allowlist
-        if port not in ALLOWED_PORTS:
+        exact, suffixes, services, bare = self.allowlist
+        service_ports = services.get(host)
+        if service_ports is None:
+            ports = set(ALLOWED_PORTS)
+        else:
+            ports = set(service_ports)
+            if host in bare:
+                ports |= set(ALLOWED_PORTS)
+        if port not in ports:
             self._refuse(403, "Forbidden", f"{what}: port {port} is not proxied")
             return False
         if not host_allowed(host, exact, suffixes):
@@ -314,19 +336,22 @@ class Handler(socketserver.StreamRequestHandler):
         try:
             infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         except OSError as e:
-            self._refuse(502, "Bad Gateway", f"{what}: {type(e).__name__}: {e}", quiet=True)
-            emit("ERROR", "dns_failure", host=host, port=port,
-                 error_type=type(e).__name__, error=str(e))
+            self._refuse(502, "Bad Gateway", f"{what}: {type(e).__name__}: {e}")
             return None
 
+        # A host service (an explicit host:port entry) is reached at a
+        # non-public address: the Mac's address on the container network.
+        # Everything else must still resolve to a globally routable
+        # address, so an allowlisted domain cannot become a pivot into a
+        # private network.
+        allow_non_public = host in self.allowlist[2]
         candidates = [
             (family, socktype, proto, sa)
             for family, socktype, proto, _, sa in infos
-            if is_public_ip(sa[0])
+            if allow_non_public or is_public_ip(sa[0])
         ]
         if not candidates:
-            self._refuse(502, "Bad Gateway", f"{what}: no public address", quiet=True)
-            emit("DENY", "non_public_address", host=host, port=port)
+            self._refuse(403, "Forbidden", f"{what}: no public address")
             return None
 
         last_error: OSError | None = None
@@ -342,14 +367,10 @@ class Handler(socketserver.StreamRequestHandler):
             sock.settimeout(None)
             return sock
 
-        self._refuse(502, "Bad Gateway", f"{what}: {type(last_error).__name__}: {last_error}", quiet=True)
-        emit("ERROR", "connect_failure", host=host, port=port,
-             error_type=type(last_error).__name__, error=str(last_error))
+        self._refuse(502, "Bad Gateway", f"{what}: {type(last_error).__name__}: {last_error}")
         return None
 
-    def _refuse(self, code: int, reason: str, detail: str, quiet: bool = False) -> None:
-        if not quiet:
-            emit("DENY", "refused", status=code, reason=reason, detail=detail)
+    def _refuse(self, code: int, reason: str, detail: str) -> None:
         body = f"open-sandbox: {detail}\n".encode()
         head = (
             f"HTTP/1.1 {code} {reason}\r\n"
@@ -403,22 +424,12 @@ class ProxyServer(socketserver.ThreadingTCPServer):
 
 
 def main() -> int:
-    exact, suffixes = load_allowlist(ALLOWLIST_PATH)
-    Handler.allowlist = (exact, suffixes)
-
-    rules = sorted(exact) + sorted(suffixes)
-    emit("INFO", "startup",
-         uid=os.getuid(), host=LISTEN_HOST, port=LISTEN_PORT,
-         allowlist_path=ALLOWLIST_PATH, rule_count=len(rules), rules=", ".join(rules))
-    if not rules:
-        emit("WARN", "empty_allowlist")
+    Handler.allowlist = load_allowlist(ALLOWLIST_PATH)
 
     try:
         server = ProxyServer((LISTEN_HOST, LISTEN_PORT), Handler)
     except OSError as e:
-        emit("FATAL", "bind_failure", host=LISTEN_HOST, port=LISTEN_PORT,
-             error_type=type(e).__name__, error=str(e))
-        return 1
+        fail(f"cannot listen on {LISTEN_HOST}:{LISTEN_PORT}: {e}")
 
     try:
         server.serve_forever()

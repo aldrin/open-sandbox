@@ -129,9 +129,10 @@ ENV PATH="/home/agent/.local/share/fnm/aliases/default/bin:/home/agent/.local/sh
 RUN fnm install --lts \
     && fnm default "$(fnm ls | grep -oE 'v[0-9]+(\.[0-9]+){2}' | sort -V | tail -1)"
 
-# TypeScript 7 (the native tsgo compiler), the language server OpenCode drives
-# for .ts files, Biome for lint + format, and pnpm as the project package
-# manager. Vite and Vitest are installed per project.
+# TypeScript 7 (the native tsgo compiler), a TypeScript language server for
+# manual use, Biome for lint + format, and pnpm as the project package manager.
+# OpenCode v2 does not run language servers itself, but the tools stay available
+# to the agent. Vite and Vitest are installed per project.
 RUN npm install -g \
       typescript \
       typescript-language-server \
@@ -170,45 +171,47 @@ RUN curl https://install.duckdb.org | sh
 
 USER root
 
-# The agent's npm prefix points at its own home; root instead installs OpenCode
-# into the system prefix, so the tree stays root-owned and out of the agent's
-# reach. These are scoped to the RUN rather than set with ENV, since ENV is
-# image-wide and would otherwise overwrite the agent's prefix for the final
-# image.
-RUN NPM_CONFIG_PREFIX=/usr/local NPM_CONFIG_CACHE=/root/.npm \
-      npm install -g opencode-ai \
-    && npm cache clean --force
+# OpenCode v2 ships a native binary. The installer writes to $HOME/.opencode/bin
+# and edits shell startup files unless told not to, so give it a throwaway HOME
+# and copy the binary into the system prefix. Root owns /usr/local/bin, which
+# keeps the agent from rewriting the binary. Tracks the latest v2 release.
+RUN curl -fsSL https://opencode.ai/v2/install \
+    | HOME=/tmp/opencode-install SHELL=/bin/bash bash -s -- --no-modify-path \
+    && install -m 0755 /tmp/opencode-install/.opencode/bin/opencode /usr/local/bin/opencode \
+    && rm -rf /tmp/opencode-install
 
 # OpenCode Power Pack: source of the code-review, security-review, and related
 # skills ported from Anthropic's Claude Code plugins. Installed into the image so
 # OpenCode reads the skill files from the global node_modules instead of fetching
 # them at startup; opencode.json selects the specific skill directories it wants
-# under skills.paths, so the rest of the catalog stays out of context. Tracks the
+# under skills, so the rest of the catalog stays out of context. Tracks the
 # latest release, so a rebuild picks up the newest skill content.
 RUN NPM_CONFIG_PREFIX=/usr/local NPM_CONFIG_CACHE=/root/.npm \
       npm install -g @waybarrios/opencode-power-pack@latest \
     && npm cache clean --force
 
 # =============================================================================
-# Workspace — root-owned config, sticky-bit parents
+# Workspace — root-owned config
 # =============================================================================
 #
-# The agent runs unprivileged, so root-owned config files are read-only to it.
-# Sticky bits on the parent directories stop the agent from deleting or
-# renaming its way around a file it cannot rewrite in place. This raises the
-# bar; the container boundary is still the guarantee that matters.
+# The agent runs unprivileged, so root-owned files are read-only to it. That
+# stops accidental edits. It does not stop a deliberate agent from renaming
+# ~/.config/opencode aside and writing its own, because the agent owns
+# ~/.config. The firewall and proxy, not these files, are the boundary. The
+# entrypoint, proxy, allowlist, and verify scripts live under root-owned
+# directories, so they cannot be moved aside either.
 
 COPY entrypoint.sh /usr/local/bin/open-sandbox-entrypoint
 COPY egress-proxy.py /usr/local/lib/open-sandbox/egress-proxy.py
 COPY allowlist.txt /etc/open-sandbox/allowlist.txt
-COPY sandbox-checks.py /home/agent/sandbox-checks.py
-COPY sandbox-tools.py /home/agent/sandbox-tools.py
+COPY sandbox-checks.py /usr/local/lib/open-sandbox/sandbox-checks.py
+COPY sandbox-tools.py /usr/local/lib/open-sandbox/sandbox-tools.py
 
-# OpenCode: global config, global context file, slash commands, and TUI settings
+# OpenCode: global config, global context file, slash commands, and CLI settings
 COPY opencode.json /home/agent/.config/opencode/opencode.json
 COPY AGENTS.md /home/agent/.config/opencode/AGENTS.md
-COPY tui.json /home/agent/.config/opencode/tui.json
-COPY commands/ /home/agent/.config/opencode/command/
+COPY cli.json /home/agent/.config/opencode/cli.json
+COPY commands/ /home/agent/.config/opencode/commands/
 
 RUN chmod 0755 /usr/local/bin/open-sandbox-entrypoint \
                 /usr/local/lib/open-sandbox/egress-proxy.py \
@@ -216,15 +219,20 @@ RUN chmod 0755 /usr/local/bin/open-sandbox-entrypoint \
  && chmod 0444 /etc/open-sandbox/allowlist.txt \
  && chown -R root:root /home/agent/.config/opencode \
  && chmod -R a-w /home/agent/.config/opencode \
+ && chmod 0644 /usr/local/lib/open-sandbox/sandbox-checks.py \
+               /usr/local/lib/open-sandbox/sandbox-tools.py \
  && chown agent:agent /home/agent /home/agent/.config \
- && chmod 1755 /home/agent /home/agent/.config \
+ && chmod 0755 /home/agent /home/agent/.config \
  && install -d -o agent -g agent -m 0700 /home/agent/.local/share/opencode \
- && install -d -o agent -g agent -m 0755 /tmp/agent \
- && chown agent:agent /home/agent/sandbox-checks.py /home/agent/sandbox-tools.py
+ && install -d -o agent -g agent -m 0755 /tmp/agent
 
 ENV TMPDIR=/tmp/agent
 
 WORKDIR /home/agent/code
 
 ENTRYPOINT ["/usr/local/bin/open-sandbox-entrypoint"]
-CMD ["opencode"]
+# OpenCode v2's shared background service persists its own service.json in
+# ~/.config/opencode, which is deliberately root-owned and read-only. A
+# standalone server needs no such file and is the right shape for a disposable,
+# single-user VM.
+CMD ["opencode", "--standalone"]
